@@ -2,13 +2,12 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:just_audio/just_audio.dart';
 import 'package:just_audio_background/just_audio_background.dart';
-import 'package:on_audio_query/on_audio_query.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:provider/provider.dart';
 import 'package:google_fonts/google_fonts.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 import 'package:rxdart/rxdart.dart';
-import 'dart:math';
+import 'dart:io';
+import 'dart:typed_data';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -32,6 +31,26 @@ void main() async {
 
 // ─── MODELS ───────────────────────────────────────────────────────────────────
 
+class SongModel {
+  final String id;
+  final String title;
+  final String artist;
+  final String album;
+  final String path;
+  final int duration;
+  Uint8List? artwork;
+
+  SongModel({
+    required this.id,
+    required this.title,
+    required this.artist,
+    required this.album,
+    required this.path,
+    required this.duration,
+    this.artwork,
+  });
+}
+
 class PositionData {
   final Duration position;
   final Duration bufferedPosition;
@@ -43,7 +62,6 @@ class PositionData {
 
 class SonoProvider extends ChangeNotifier {
   final AudioPlayer player = AudioPlayer();
-  final OnAudioQuery audioQuery = OnAudioQuery();
 
   List<SongModel> allSongs = [];
   List<SongModel> filteredSongs = [];
@@ -55,6 +73,7 @@ class SonoProvider extends ChangeNotifier {
   LoopMode loopMode = LoopMode.off;
   int currentNavIndex = 0;
   String searchQuery = '';
+  bool isLoading = false;
 
   SonoProvider() {
     _initPlayer();
@@ -75,18 +94,61 @@ class SonoProvider extends ChangeNotifier {
   }
 
   Future<void> loadSongs() async {
+    isLoading = true;
+    notifyListeners();
+
     final status = await Permission.audio.request();
     if (!status.isGranted) {
       await Permission.storage.request();
     }
-    allSongs = await audioQuery.querySongs(
-      sortType: SongSortType.TITLE,
-      orderType: OrderType.ASC_OR_SMALLER,
-      uriType: UriType.EXTERNAL,
-      ignoreCase: true,
-    );
+
+    final List<SongModel> songs = [];
+    final dirs = [
+      '/storage/emulated/0/Music',
+      '/storage/emulated/0/Download',
+      '/storage/emulated/0/Downloads',
+    ];
+
+    for (final dirPath in dirs) {
+      final dir = Directory(dirPath);
+      if (await dir.exists()) {
+        await _scanDir(dir, songs);
+      }
+    }
+
+    songs.sort((a, b) => a.title.compareTo(b.title));
+    allSongs = songs;
     filteredSongs = List.from(allSongs);
+    isLoading = false;
     notifyListeners();
+  }
+
+  Future<void> _scanDir(Directory dir, List<SongModel> songs) async {
+    final extensions = ['.mp3', '.flac', '.opus', '.aac', '.m4a', '.ogg', '.wav'];
+    try {
+      await for (final entity in dir.list(recursive: true)) {
+        if (entity is File) {
+          final ext = entity.path.toLowerCase();
+          if (extensions.any((e) => ext.endsWith(e))) {
+            final stat = await entity.stat();
+            final name = entity.path.split('/').last;
+            final title = name.contains('.')
+                ? name.substring(0, name.lastIndexOf('.'))
+                : name;
+            songs.add(SongModel(
+              id: entity.path,
+              title: title,
+              artist: 'Bilinmeyen Sanatçı',
+              album: '',
+              path: entity.path,
+              duration: 0,
+            ));
+          }
+        }
+      }
+    } catch (e) {
+      debugPrint('Scan error: $e');
+    }
   }
 
   void search(String query) {
@@ -97,7 +159,7 @@ class SonoProvider extends ChangeNotifier {
       final q = query.toLowerCase();
       filteredSongs = allSongs.where((s) {
         final titleMatch = s.title.toLowerCase().contains(q);
-        final artistMatch = (s.artist ?? '').toLowerCase().contains(q);
+        final artistMatch = s.artist.toLowerCase().contains(q);
         return titleMatch || artistMatch;
       }).toList();
     }
@@ -106,18 +168,18 @@ class SonoProvider extends ChangeNotifier {
 
   Future<void> playSong(SongModel song, List<SongModel> songList) async {
     queue = List.from(songList);
-    currentIndex = queue.indexOf(song);
+    currentIndex = queue.indexWhere((s) => s.id == song.id);
     currentSong = song;
 
     final playlist = ConcatenatingAudioSource(
       children: queue.map((s) => AudioSource.uri(
-        Uri.parse(s.uri!),
+        Uri.file(s.path),
         tag: MediaItem(
-          id: s.id.toString(),
+          id: s.id,
           title: s.title,
-          artist: s.artist ?? 'Bilinmeyen Sanatçı',
-          album: s.album ?? '',
-          duration: Duration(milliseconds: s.duration ?? 0),
+          artist: s.artist,
+          album: s.album,
+          duration: Duration(milliseconds: s.duration),
         ),
       )).toList(),
     );
@@ -135,13 +197,8 @@ class SonoProvider extends ChangeNotifier {
     }
   }
 
-  Future<void> next() async {
-    await player.seekToNext();
-  }
-
-  Future<void> previous() async {
-    await player.seekToPrevious();
-  }
+  Future<void> next() async => await player.seekToNext();
+  Future<void> previous() async => await player.seekToPrevious();
 
   Future<void> toggleShuffle() async {
     shuffle = !shuffle;
@@ -230,7 +287,6 @@ class _SonoHomeState extends State<SonoHome> {
   @override
   Widget build(BuildContext context) {
     final provider = context.watch<SonoProvider>();
-
     final pages = [
       const LibraryPage(),
       const SearchPage(),
@@ -332,25 +388,34 @@ class LibraryPage extends StatelessWidget {
             ),
           ),
           Expanded(
-            child: provider.allSongs.isEmpty
+            child: provider.isLoading
                 ? const Center(
                     child: CircularProgressIndicator(
                       color: Color(0xFF6C63FF),
                     ),
                   )
-                : ListView.builder(
-                    padding: const EdgeInsets.only(bottom: 160),
-                    itemCount: provider.allSongs.length,
-                    itemBuilder: (context, index) {
-                      final song = provider.allSongs[index];
-                      return SongTile(
-                        song: song,
-                        songList: provider.allSongs,
-                        isPlaying: provider.currentSong?.id == song.id &&
-                            provider.isPlaying,
-                      );
-                    },
-                  ),
+                : provider.allSongs.isEmpty
+                    ? Center(
+                        child: Text(
+                          'Müzik bulunamadı',
+                          style: TextStyle(
+                              color: Colors.white.withOpacity(0.3)),
+                        ),
+                      )
+                    : ListView.builder(
+                        padding: const EdgeInsets.only(bottom: 160),
+                        itemCount: provider.allSongs.length,
+                        itemBuilder: (context, index) {
+                          final song = provider.allSongs[index];
+                          return SongTile(
+                            song: song,
+                            songList: provider.allSongs,
+                            isPlaying:
+                                provider.currentSong?.id == song.id &&
+                                    provider.isPlaying,
+                          );
+                        },
+                      ),
           ),
         ],
       ),
@@ -391,11 +456,14 @@ class _SearchPageState extends State<SearchPage> {
               style: const TextStyle(color: Colors.white),
               decoration: InputDecoration(
                 hintText: 'Şarkı veya sanatçı ara...',
-                hintStyle: TextStyle(color: Colors.white.withOpacity(0.3)),
-                prefixIcon: const Icon(Icons.search, color: Color(0xFF6C63FF)),
+                hintStyle:
+                    TextStyle(color: Colors.white.withOpacity(0.3)),
+                prefixIcon:
+                    const Icon(Icons.search, color: Color(0xFF6C63FF)),
                 suffixIcon: _controller.text.isNotEmpty
                     ? IconButton(
-                        icon: const Icon(Icons.clear, color: Colors.white54),
+                        icon: const Icon(Icons.clear,
+                            color: Colors.white54),
                         onPressed: () {
                           _controller.clear();
                           provider.search('');
@@ -410,7 +478,8 @@ class _SearchPageState extends State<SearchPage> {
                 ),
                 focusedBorder: OutlineInputBorder(
                   borderRadius: BorderRadius.circular(16),
-                  borderSide: const BorderSide(color: Color(0xFF6C63FF)),
+                  borderSide:
+                      const BorderSide(color: Color(0xFF6C63FF)),
                 ),
               ),
             ),
@@ -479,7 +548,8 @@ class QueuePage extends StatelessWidget {
                 ? Center(
                     child: Text(
                       'Kuyruk boş',
-                      style: TextStyle(color: Colors.white.withOpacity(0.3)),
+                      style: TextStyle(
+                          color: Colors.white.withOpacity(0.3)),
                     ),
                   )
                 : ListView.builder(
@@ -524,29 +594,30 @@ class SongTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return ListTile(
-      contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+      contentPadding:
+          const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
       leading: ClipRRect(
         borderRadius: BorderRadius.circular(10),
-        child: QueryArtworkWidget(
-          id: song.id,
-          type: ArtworkType.AUDIO,
-          artworkWidth: 52,
-          artworkHeight: 52,
-          artworkFit: BoxFit.cover,
-          nullArtworkWidget: Container(
-            width: 52,
-            height: 52,
-            decoration: BoxDecoration(
-              color: const Color(0xFF1A1A26),
-              borderRadius: BorderRadius.circular(10),
-            ),
-            child: Icon(
-              Icons.music_note,
-              color: const Color(0xFF6C63FF).withOpacity(0.6),
-              size: 24,
-            ),
-          ),
-        ),
+        child: song.artwork != null
+            ? Image.memory(
+                song.artwork!,
+                width: 52,
+                height: 52,
+                fit: BoxFit.cover,
+              )
+            : Container(
+                width: 52,
+                height: 52,
+                decoration: BoxDecoration(
+                  color: const Color(0xFF1A1A26),
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: Icon(
+                  Icons.music_note,
+                  color: const Color(0xFF6C63FF).withOpacity(0.6),
+                  size: 24,
+                ),
+              ),
       ),
       title: _buildHighlightedText(
         song.title,
@@ -565,7 +636,7 @@ class SongTile extends StatelessWidget {
             : null,
       ),
       subtitle: _buildHighlightedText(
-        song.artist ?? 'Bilinmeyen Sanatçı',
+        song.artist,
         highlightQuery,
         TextStyle(
           color: Colors.white.withOpacity(0.45),
@@ -576,7 +647,7 @@ class SongTile extends StatelessWidget {
       trailing: isPlaying
           ? const _PlayingIndicator()
           : Text(
-              _formatDuration(song.duration ?? 0),
+              _formatDuration(song.duration),
               style: TextStyle(
                 color: Colors.white.withOpacity(0.3),
                 fontSize: 12,
@@ -612,7 +683,10 @@ class SongTile extends StatelessWidget {
     final index = lowerText.indexOf(lowerQuery);
 
     if (index == -1) {
-      return Text(text, style: baseStyle, maxLines: 1, overflow: TextOverflow.ellipsis);
+      return Text(text,
+          style: baseStyle,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis);
     }
 
     return RichText(
@@ -620,7 +694,8 @@ class SongTile extends StatelessWidget {
       overflow: TextOverflow.ellipsis,
       text: TextSpan(
         children: [
-          TextSpan(text: text.substring(0, index), style: baseStyle),
+          TextSpan(
+              text: text.substring(0, index), style: baseStyle),
           TextSpan(
             text: text.substring(index, index + query.length),
             style: baseStyle.copyWith(
@@ -628,7 +703,9 @@ class SongTile extends StatelessWidget {
               fontWeight: FontWeight.w800,
             ),
           ),
-          TextSpan(text: text.substring(index + query.length), style: baseStyle),
+          TextSpan(
+              text: text.substring(index + query.length),
+              style: baseStyle),
         ],
       ),
     );
@@ -636,8 +713,10 @@ class SongTile extends StatelessWidget {
 
   String _formatDuration(int ms) {
     final d = Duration(milliseconds: ms);
-    final m = d.inMinutes.remainder(60).toString().padLeft(2, '0');
-    final s = d.inSeconds.remainder(60).toString().padLeft(2, '0');
+    final m =
+        d.inMinutes.remainder(60).toString().padLeft(2, '0');
+    final s =
+        d.inSeconds.remainder(60).toString().padLeft(2, '0');
     return '$m:$s';
   }
 }
@@ -719,11 +798,13 @@ class MiniPlayer extends StatelessWidget {
       ),
       child: Container(
         margin: const EdgeInsets.symmetric(horizontal: 12),
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        padding:
+            const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
         decoration: BoxDecoration(
           color: const Color(0xFF1A1A2E),
           borderRadius: BorderRadius.circular(20),
-          border: Border.all(color: Colors.white.withOpacity(0.08)),
+          border:
+              Border.all(color: Colors.white.withOpacity(0.08)),
           boxShadow: [
             BoxShadow(
               color: const Color(0xFF6C63FF).withOpacity(0.15),
@@ -736,20 +817,20 @@ class MiniPlayer extends StatelessWidget {
           children: [
             ClipRRect(
               borderRadius: BorderRadius.circular(10),
-              child: QueryArtworkWidget(
-                id: song.id,
-                type: ArtworkType.AUDIO,
-                artworkWidth: 44,
-                artworkHeight: 44,
-                artworkFit: BoxFit.cover,
-                nullArtworkWidget: Container(
-                  width: 44,
-                  height: 44,
-                  color: const Color(0xFF12121A),
-                  child: const Icon(Icons.music_note,
-                      color: Color(0xFF6C63FF), size: 20),
-                ),
-              ),
+              child: song.artwork != null
+                  ? Image.memory(
+                      song.artwork!,
+                      width: 44,
+                      height: 44,
+                      fit: BoxFit.cover,
+                    )
+                  : Container(
+                      width: 44,
+                      height: 44,
+                      color: const Color(0xFF12121A),
+                      child: const Icon(Icons.music_note,
+                          color: Color(0xFF6C63FF), size: 20),
+                    ),
             ),
             const SizedBox(width: 12),
             Expanded(
@@ -768,7 +849,7 @@ class MiniPlayer extends StatelessWidget {
                     overflow: TextOverflow.ellipsis,
                   ),
                   Text(
-                    song.artist ?? 'Bilinmeyen Sanatçı',
+                    song.artist,
                     style: TextStyle(
                       color: Colors.white.withOpacity(0.4),
                       fontSize: 11,
@@ -781,7 +862,9 @@ class MiniPlayer extends StatelessWidget {
             ),
             IconButton(
               icon: Icon(
-                provider.isPlaying ? Icons.pause_rounded : Icons.play_arrow_rounded,
+                provider.isPlaying
+                    ? Icons.pause_rounded
+                    : Icons.play_arrow_rounded,
                 color: Colors.white,
                 size: 28,
               ),
@@ -836,7 +919,6 @@ class NowPlayingPage extends StatelessWidget {
         child: Column(
           children: [
             const SizedBox(height: 24),
-            // Artwork
             Container(
               width: double.infinity,
               height: 300,
@@ -844,7 +926,8 @@ class NowPlayingPage extends StatelessWidget {
                 borderRadius: BorderRadius.circular(24),
                 boxShadow: [
                   BoxShadow(
-                    color: const Color(0xFF6C63FF).withOpacity(0.3),
+                    color:
+                        const Color(0xFF6C63FF).withOpacity(0.3),
                     blurRadius: 40,
                     offset: const Offset(0, 16),
                   ),
@@ -852,28 +935,26 @@ class NowPlayingPage extends StatelessWidget {
               ),
               child: ClipRRect(
                 borderRadius: BorderRadius.circular(24),
-                child: QueryArtworkWidget(
-                  id: song.id,
-                  type: ArtworkType.AUDIO,
-                  artworkWidth: double.infinity,
-                  artworkHeight: 300,
-                  artworkFit: BoxFit.cover,
-                  nullArtworkWidget: Container(
-                    decoration: BoxDecoration(
-                      color: const Color(0xFF1A1A26),
-                      borderRadius: BorderRadius.circular(24),
-                    ),
-                    child: Icon(
-                      Icons.music_note_rounded,
-                      size: 80,
-                      color: const Color(0xFF6C63FF).withOpacity(0.4),
-                    ),
-                  ),
-                ),
+                child: song.artwork != null
+                    ? Image.memory(
+                        song.artwork!,
+                        fit: BoxFit.cover,
+                      )
+                    : Container(
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF1A1A26),
+                          borderRadius: BorderRadius.circular(24),
+                        ),
+                        child: Icon(
+                          Icons.music_note_rounded,
+                          size: 80,
+                          color: const Color(0xFF6C63FF)
+                              .withOpacity(0.4),
+                        ),
+                      ),
               ),
             ),
             const SizedBox(height: 32),
-            // Title & Artist
             Row(
               children: [
                 Expanded(
@@ -892,7 +973,7 @@ class NowPlayingPage extends StatelessWidget {
                       ),
                       const SizedBox(height: 4),
                       Text(
-                        song.artist ?? 'Bilinmeyen Sanatçı',
+                        song.artist,
                         style: TextStyle(
                           color: Colors.white.withOpacity(0.5),
                           fontSize: 15,
@@ -906,12 +987,12 @@ class NowPlayingPage extends StatelessWidget {
               ],
             ),
             const SizedBox(height: 28),
-            // Progress Bar
             StreamBuilder<PositionData>(
               stream: provider.positionDataStream,
               builder: (context, snapshot) {
                 final data = snapshot.data ??
-                    PositionData(Duration.zero, Duration.zero, Duration.zero);
+                    PositionData(
+                        Duration.zero, Duration.zero, Duration.zero);
                 final position = data.position;
                 final duration = data.duration;
 
@@ -920,11 +1001,13 @@ class NowPlayingPage extends StatelessWidget {
                     SliderTheme(
                       data: SliderTheme.of(context).copyWith(
                         activeTrackColor: const Color(0xFF6C63FF),
-                        inactiveTrackColor: Colors.white.withOpacity(0.1),
+                        inactiveTrackColor:
+                            Colors.white.withOpacity(0.1),
                         thumbColor: Colors.white,
                         thumbShape: const RoundSliderThumbShape(
                             enabledThumbRadius: 6),
-                        overlayShape: SliderComponentShape.noOverlay,
+                        overlayShape:
+                            SliderComponentShape.noOverlay,
                         trackHeight: 3,
                       ),
                       child: Slider(
@@ -933,13 +1016,14 @@ class NowPlayingPage extends StatelessWidget {
                             .toDouble(),
                         max: duration.inMilliseconds.toDouble(),
                         onChanged: (value) {
-                          provider.player.seek(
-                              Duration(milliseconds: value.toInt()));
+                          provider.player.seek(Duration(
+                              milliseconds: value.toInt()));
                         },
                       ),
                     ),
                     Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      mainAxisAlignment:
+                          MainAxisAlignment.spaceBetween,
                       children: [
                         Text(
                           _fmt(position),
@@ -962,7 +1046,6 @@ class NowPlayingPage extends StatelessWidget {
               },
             ),
             const SizedBox(height: 16),
-            // Controls
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceEvenly,
               children: [
@@ -991,7 +1074,8 @@ class NowPlayingPage extends StatelessWidget {
                       shape: BoxShape.circle,
                       boxShadow: [
                         BoxShadow(
-                          color: const Color(0xFF6C63FF).withOpacity(0.4),
+                          color: const Color(0xFF6C63FF)
+                              .withOpacity(0.4),
                           blurRadius: 20,
                           offset: const Offset(0, 6),
                         ),
@@ -1013,11 +1097,9 @@ class NowPlayingPage extends StatelessWidget {
                 ),
                 IconButton(
                   icon: Icon(
-                    provider.loopMode == LoopMode.off
-                        ? Icons.repeat_rounded
-                        : provider.loopMode == LoopMode.all
-                            ? Icons.repeat_rounded
-                            : Icons.repeat_one_rounded,
+                    provider.loopMode == LoopMode.one
+                        ? Icons.repeat_one_rounded
+                        : Icons.repeat_rounded,
                     color: provider.loopMode != LoopMode.off
                         ? const Color(0xFF6C63FF)
                         : Colors.white.withOpacity(0.4),
@@ -1034,8 +1116,10 @@ class NowPlayingPage extends StatelessWidget {
   }
 
   String _fmt(Duration d) {
-    final m = d.inMinutes.remainder(60).toString().padLeft(2, '0');
-    final s = d.inSeconds.remainder(60).toString().padLeft(2, '0');
+    final m =
+        d.inMinutes.remainder(60).toString().padLeft(2, '0');
+    final s =
+        d.inSeconds.remainder(60).toString().padLeft(2, '0');
     return '$m:$s';
   }
 }
