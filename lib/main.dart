@@ -14,16 +14,23 @@ import 'dart:convert';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  await JustAudioBackground.init(
-    androidNotificationChannelId: 'com.skydivex.sono.channel.audio',
-    androidNotificationChannelName: 'SONO Audio',
-    androidNotificationOngoing: true,
-    androidShowNotificationBadge: true,
-  );
+  
+  try {
+    await JustAudioBackground.init(
+      androidNotificationChannelId: 'com.skydivex.sono.channel.audio',
+      androidNotificationChannelName: 'SONO Audio',
+      androidNotificationOngoing: true,
+      androidShowNotificationBadge: true,
+    );
+  } catch (e) {
+    debugPrint('JustAudioBackground init error: $e');
+  }
+
   SystemChrome.setSystemUIOverlayStyle(const SystemUiOverlayStyle(
     statusBarColor: Colors.transparent,
     statusBarIconBrightness: Brightness.light,
   ));
+
   runApp(
     ChangeNotifierProvider(
       create: (_) => SonoProvider(),
