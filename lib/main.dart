@@ -6,8 +6,8 @@ import 'package:permission_handler/permission_handler.dart';
 import 'package:provider/provider.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:rxdart/rxdart.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 import 'package:http/http.dart' as http;
+import 'package:audiotags/audiotags.dart';
 import 'dart:io';
 import 'dart:typed_data';
 import 'dart:convert';
@@ -117,7 +117,6 @@ class SonoProvider extends ChangeNotifier {
   bool isLoading = false;
   SortType sortType = SortType.titleAsc;
 
-  // Güncelleme
   String? latestVersion;
   String? updateUrl;
   bool hasUpdate = false;
@@ -156,8 +155,6 @@ class SonoProvider extends ChangeNotifier {
     }
 
     final List<SongModel> songs = [];
-
-    // Sadece müzik klasörlerini tara, tüm depolamayı değil
     final dirs = [
       '/storage/emulated/0/Music',
       '/storage/emulated/0/Download',
@@ -173,7 +170,6 @@ class SonoProvider extends ChangeNotifier {
       }
     }
 
-    // Tekrar eden path'leri temizle
     final seen = <String>{};
     final unique = songs.where((s) => seen.add(s.path)).toList();
 
@@ -194,17 +190,41 @@ class SonoProvider extends ChangeNotifier {
           if (extensions.any((e) => lower.endsWith(e))) {
             final stat = await entity.stat();
             final name = entity.path.split('/').last;
-            final title = name.contains('.')
+            final rawTitle = name.contains('.')
                 ? name.substring(0, name.lastIndexOf('.'))
                 : name;
+
+            // ID3 tag oku
+            String title = rawTitle;
+            String artist = 'Bilinmeyen Sanatçı';
+            String album = '';
+            int duration = 0;
+            Uint8List? artwork;
+
+            try {
+              final tag = await AudioTags.read(entity.path);
+              if (tag != null) {
+                title = (tag.title?.isNotEmpty == true) ? tag.title! : rawTitle;
+                artist = (tag.trackArtist?.isNotEmpty == true) ? tag.trackArtist! : 'Bilinmeyen Sanatçı';
+                album = tag.album ?? '';
+                duration = ((tag.duration ?? 0) * 1000).toInt();
+                if (tag.pictures.isNotEmpty) {
+                  artwork = tag.pictures.first.bytes;
+                }
+              }
+            } catch (e) {
+              debugPrint('Tag read error: $e');
+            }
+
             songs.add(SongModel(
               id: entity.path,
               title: title,
-              artist: 'Bilinmeyen Sanatçı',
-              album: '',
+              artist: artist,
+              album: album,
               path: entity.path,
-              duration: 0,
+              duration: duration,
               dateAdded: stat.modified,
+              artwork: artwork,
             ));
           }
         }
@@ -223,7 +243,6 @@ class SonoProvider extends ChangeNotifier {
   void _applySortAndFilter() {
     List<SongModel> list = List.from(allSongs);
 
-    // Sıralama
     switch (sortType) {
       case SortType.titleAsc:
         list.sort((a, b) => a.title.compareTo(b.title));
@@ -245,12 +264,10 @@ class SonoProvider extends ChangeNotifier {
         break;
     }
 
-    // Arama filtresi
     if (searchQuery.isNotEmpty) {
       final q = searchQuery.toLowerCase();
       list = list.where((s) {
-        return s.title.toLowerCase().contains(q) ||
-            s.artist.toLowerCase().contains(q);
+        return s.title.toLowerCase().contains(q) || s.artist.toLowerCase().contains(q);
       }).toList();
     }
 
@@ -271,16 +288,15 @@ class SonoProvider extends ChangeNotifier {
 
     final playlist = ConcatenatingAudioSource(
       children: queue.map((s) {
-        final uri = s.path.startsWith('/')
-            ? Uri.parse('file://${s.path}')
-            : Uri.parse(s.path);
         return AudioSource.uri(
-          uri,
+          Uri.file(s.path),
           tag: MediaItem(
             id: s.id,
             title: s.title,
             artist: s.artist,
             album: s.album,
+            duration: Duration(milliseconds: s.duration),
+            artUri: s.artwork != null ? Uri.dataFromBytes(s.artwork!, mimeType: 'image/jpeg') : null,
           ),
         );
       }).toList(),
@@ -325,8 +341,6 @@ class SonoProvider extends ChangeNotifier {
     notifyListeners();
   }
 
-  // ─── GÜNCELLEME SİSTEMİ ───────────────────────────────────────────────────
-
   Future<void> checkForUpdate() async {
     try {
       final response = await http.get(
@@ -337,7 +351,6 @@ class SonoProvider extends ChangeNotifier {
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body);
         final tag = data['tag_name'] as String? ?? '';
-        // Tag: v1.0.33 → runNumber: 33
         final tagParts = tag.replaceAll('v', '').split('.');
         final tagRunNumber = tagParts.length >= 3 ? int.tryParse(tagParts[2]) ?? 0 : 0;
         final currentRunNumber = int.tryParse(kAppVersion.split('.').last) ?? 0;
@@ -398,9 +411,7 @@ class SonoApp extends StatelessWidget {
           secondary: Color(0xFFFF6584),
           surface: Color(0xFF12121A),
         ),
-        textTheme: GoogleFonts.spaceGroteskTextTheme(
-          ThemeData.dark().textTheme,
-        ),
+        textTheme: GoogleFonts.spaceGroteskTextTheme(ThemeData.dark().textTheme),
       ),
       home: const SonoHome(),
     );
@@ -445,6 +456,7 @@ class _SonoHomeState extends State<SonoHome> {
     ];
 
     return Scaffold(
+      resizeToAvoidBottomInset: false,
       backgroundColor: const Color(0xFF0A0A0F),
       body: Stack(
         children: [
@@ -473,13 +485,8 @@ class _SonoHomeState extends State<SonoHome> {
           children: [
             const Icon(Icons.system_update_rounded, color: Color(0xFF6C63FF)),
             const SizedBox(width: 10),
-            Text(
-              'Güncelleme Mevcut',
-              style: GoogleFonts.spaceGrotesk(
-                color: Colors.white,
-                fontWeight: FontWeight.w700,
-              ),
-            ),
+            Text('Güncelleme Mevcut',
+                style: GoogleFonts.spaceGrotesk(color: Colors.white, fontWeight: FontWeight.w700)),
           ],
         ),
         content: Text(
@@ -610,7 +617,6 @@ class LibraryPage extends StatelessWidget {
                     letterSpacing: 4,
                   ),
                 ),
-                // Sıralama butonu
                 _SortButton(),
               ],
             ),
@@ -662,7 +668,6 @@ class _SortButton extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final provider = context.watch<SonoProvider>();
-
     return IconButton(
       icon: const Icon(Icons.sort_rounded, color: Colors.white70),
       onPressed: () {
@@ -678,26 +683,21 @@ class _SortButton extends StatelessWidget {
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(
-                  'Sırala',
-                  style: GoogleFonts.spaceGrotesk(
-                    fontSize: 18,
-                    fontWeight: FontWeight.w700,
-                    color: Colors.white,
-                  ),
-                ),
+                Text('Sırala',
+                    style: GoogleFonts.spaceGrotesk(
+                        fontSize: 18, fontWeight: FontWeight.w700, color: Colors.white)),
                 const SizedBox(height: 16),
                 ...SortType.values.map((type) => ListTile(
-                  leading: Icon(
-                    provider.sortType == type ? Icons.radio_button_checked : Icons.radio_button_off,
-                    color: provider.sortType == type ? const Color(0xFF6C63FF) : Colors.white38,
-                  ),
-                  title: Text(type.label, style: const TextStyle(color: Colors.white)),
-                  onTap: () {
-                    provider.setSortType(type);
-                    Navigator.pop(context);
-                  },
-                )),
+                      leading: Icon(
+                        provider.sortType == type ? Icons.radio_button_checked : Icons.radio_button_off,
+                        color: provider.sortType == type ? const Color(0xFF6C63FF) : Colors.white38,
+                      ),
+                      title: Text(type.label, style: const TextStyle(color: Colors.white)),
+                      onTap: () {
+                        provider.setSortType(type);
+                        Navigator.pop(context);
+                      },
+                    )),
                 const SizedBox(height: 8),
               ],
             ),
@@ -774,10 +774,8 @@ class _SearchPageState extends State<SearchPage> {
               padding: const EdgeInsets.only(left: 20, bottom: 8),
               child: Align(
                 alignment: Alignment.centerLeft,
-                child: Text(
-                  '${provider.filteredSongs.length} sonuç',
-                  style: TextStyle(color: Colors.white.withOpacity(0.4), fontSize: 13),
-                ),
+                child: Text('${provider.filteredSongs.length} sonuç',
+                    style: TextStyle(color: Colors.white.withOpacity(0.4), fontSize: 13)),
               ),
             ),
           Expanded(
@@ -820,10 +818,8 @@ class QueuePage extends StatelessWidget {
         children: [
           Padding(
             padding: const EdgeInsets.fromLTRB(20, 24, 20, 16),
-            child: Text(
-              'Çalma Sırası',
-              style: GoogleFonts.spaceGrotesk(fontSize: 24, fontWeight: FontWeight.w700),
-            ),
+            child: Text('Çalma Sırası',
+                style: GoogleFonts.spaceGrotesk(fontSize: 24, fontWeight: FontWeight.w700)),
           ),
           Expanded(
             child: provider.queue.isEmpty
@@ -892,8 +888,7 @@ class SongTile extends StatelessWidget {
                   color: const Color(0xFF1A1A26),
                   borderRadius: BorderRadius.circular(10),
                 ),
-                child: Icon(Icons.music_note,
-                    color: const Color(0xFF6C63FF).withOpacity(0.6), size: 24),
+                child: Icon(Icons.music_note, color: const Color(0xFF6C63FF).withOpacity(0.6), size: 24),
               ),
       ),
       title: _buildHighlightedText(
@@ -1100,6 +1095,7 @@ class NowPlayingPage extends StatelessWidget {
     if (song == null) return const SizedBox();
 
     return Scaffold(
+      resizeToAvoidBottomInset: false,
       backgroundColor: const Color(0xFF0A0A0F),
       appBar: AppBar(
         backgroundColor: Colors.transparent,
@@ -1152,28 +1148,25 @@ class NowPlayingPage extends StatelessWidget {
               ),
             ),
             const SizedBox(height: 32),
-            Row(
-              children: [
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        song.title,
-                        style: GoogleFonts.spaceGrotesk(
-                            fontSize: 22, fontWeight: FontWeight.w800, color: Colors.white),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                      const SizedBox(height: 4),
-                      Text(song.artist,
-                          style: TextStyle(color: Colors.white.withOpacity(0.5), fontSize: 15),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis),
-                    ],
+            Align(
+              alignment: Alignment.centerLeft,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    song.title,
+                    style: GoogleFonts.spaceGrotesk(
+                        fontSize: 22, fontWeight: FontWeight.w800, color: Colors.white),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
                   ),
-                ),
-              ],
+                  const SizedBox(height: 4),
+                  Text(song.artist,
+                      style: TextStyle(color: Colors.white.withOpacity(0.5), fontSize: 15),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis),
+                ],
+              ),
             ),
             const SizedBox(height: 28),
             StreamBuilder<PositionData>(
