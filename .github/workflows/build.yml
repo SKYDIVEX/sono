@@ -22,29 +22,18 @@ jobs:
           distribution: 'zulu'
           java-version: '17'
 
-      - name: Setup Flutter
-        uses: subosito/flutter-action@v2
-        with:
-          flutter-version: '3.22.0'
-          channel: 'stable'
-
-      - name: Get dependencies
-        run: flutter pub get
-
-      - name: Build APK
-        run: flutter build apk --debug --no-tree-shake-icons
-
-      - name: Upload APK artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: SONO-debug
-          path: build/app/outputs/flutter-apk/app-debug.apk
-
-      - name: Create Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: v1.0.${{ github.run_number }}
-          name: SONO v1.0.${{ github.run_number }}
-          files: build/app/outputs/flutter-apk/app-debug.apk
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Generate and Print Keystore
+        run: |
+          keytool -genkey -v \
+            -keystore /tmp/sono.keystore \
+            -alias sono \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 10000 \
+            -storepass sono2026 \
+            -keypass sono2026 \
+            -dname "CN=SKYDIVEX, OU=SONO, O=SKYDIVEX, L=TR, S=TR, C=TR"
+          echo "KEYSTORE_BASE64_START"
+          base64 -w 0 /tmp/sono.keystore
+          echo ""
+          echo "KEYSTORE_BASE64_END"
