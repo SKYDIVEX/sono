@@ -508,8 +508,8 @@ void main() async {
     config: const AudioServiceConfig(
       androidNotificationChannelId: 'com.skydivex.sono.channel.audio',
       androidNotificationChannelName: 'SONO',
-      androidNotificationOngoing: true,
-      androidStopForegroundOnPause: false,
+      androidNotificationOngoing: false,
+      androidStopForegroundOnPause: true,
       notificationColor: Color(0xFF6C63FF),
       androidNotificationIcon: 'mipmap/ic_launcher',
     ),
