@@ -17,6 +17,7 @@ dependencies:
   rxdart: ^0.27.7
   shared_preferences: ^2.2.3
   http: ^1.2.1
+  audiotags: ^1.3.2
 
 dev_dependencies:
   flutter_test:
