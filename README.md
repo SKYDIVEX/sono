@@ -13,7 +13,7 @@
 
 ![Flutter](https://img.shields.io/badge/Flutter-3.22-02569B?style=for-the-badge&logo=flutter)
 ![Android](https://img.shields.io/badge/Android-APK-3DDC84?style=for-the-badge&logo=android)
-![License](https://img.shields.io/badge/License-MIT-6C63FF?style=for-the-badge)
+![License](https://img.shields.io/badge/license-AGPL--3.0-blue?style=for-the-badge)
 ![Build](https://img.shields.io/github/actions/workflow/status/skydivex/sono/build.yml?style=for-the-badge&label=BUILD)
 
 </div>
