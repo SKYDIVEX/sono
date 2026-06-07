@@ -22,18 +22,44 @@ jobs:
           distribution: 'zulu'
           java-version: '17'
 
-      - name: Generate and Print Keystore
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.22.0'
+          channel: 'stable'
+
+      - name: Decode Keystore
         run: |
-          keytool -genkey -v \
-            -keystore /tmp/sono.keystore \
-            -alias sono \
-            -keyalg RSA \
-            -keysize 2048 \
-            -validity 10000 \
-            -storepass sono2026 \
-            -keypass sono2026 \
-            -dname "CN=SKYDIVEX, OU=SONO, O=SKYDIVEX, L=TR, S=TR, C=TR"
-          echo "KEYSTORE_BASE64_START"
-          base64 -w 0 /tmp/sono.keystore
-          echo ""
-          echo "KEYSTORE_BASE64_END"
+          echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > android/app/sono.keystore
+
+      - name: Get dependencies
+        run: flutter pub get
+
+      - name: Build APK
+        run: flutter build apk --release --no-tree-shake-icons
+
+      - name: Sign APK
+        run: |
+          jarsigner -verbose \
+            -sigalg SHA256withRSA \
+            -digestalg SHA-256 \
+            -keystore android/app/sono.keystore \
+            -storepass ${{ secrets.KEYSTORE_PASSWORD }} \
+            -keypass ${{ secrets.KEYSTORE_PASSWORD }} \
+            build/app/outputs/flutter-apk/app-release.apk \
+            sono
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SONO-release
+          path: build/app/outputs/flutter-apk/app-release.apk
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v1.0.${{ github.run_number }}
+          name: SONO v1.0.${{ github.run_number }}
+          files: build/app/outputs/flutter-apk/app-release.apk
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
