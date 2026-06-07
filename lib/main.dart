@@ -270,16 +270,20 @@ class SonoProvider extends ChangeNotifier {
     currentSong = song;
 
     final playlist = ConcatenatingAudioSource(
-      children: queue.map((s) => AudioSource.uri(
-        Uri.file(s.path),
-        tag: MediaItem(
-          id: s.id,
-          title: s.title,
-          artist: s.artist,
-          album: s.album,
-          duration: Duration(milliseconds: s.duration),
-        ),
-      )).toList(),
+      children: queue.map((s) {
+        final uri = s.path.startsWith('/')
+            ? Uri.parse('file://${s.path}')
+            : Uri.parse(s.path);
+        return AudioSource.uri(
+          uri,
+          tag: MediaItem(
+            id: s.id,
+            title: s.title,
+            artist: s.artist,
+            album: s.album,
+          ),
+        );
+      }).toList(),
     );
 
     await player.setAudioSource(playlist, initialIndex: currentIndex);
