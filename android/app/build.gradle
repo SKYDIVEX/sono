@@ -18,6 +18,15 @@ android {
         jvmTarget = '1.8'
     }
 
+    signingConfigs {
+        release {
+            storeFile file("sono.keystore")
+            storePassword System.getenv("KEYSTORE_PASSWORD") ?: "sono2026"
+            keyAlias "sono"
+            keyPassword System.getenv("KEYSTORE_PASSWORD") ?: "sono2026"
+        }
+    }
+
     defaultConfig {
         applicationId "com.skydivex.sono"
         minSdk 21
@@ -28,7 +37,7 @@ android {
 
     buildTypes {
         release {
-            signingConfig signingConfigs.debug
+            signingConfig signingConfigs.release
             minifyEnabled false
             shrinkResources false
         }
