@@ -6,7 +6,7 @@ plugins {
 
 android {
     namespace "com.skydivex.sono"
-    compileSdk 34
+    compileSdk 35
     ndkVersion "25.1.8937393"
 
     compileOptions {
@@ -20,8 +20,8 @@ android {
 
     defaultConfig {
         applicationId "com.skydivex.sono"
-        minSdk 16
-        targetSdk 34
+        minSdk 19
+        targetSdk 35
         versionCode 1
         versionName "1.0.0"
     }
