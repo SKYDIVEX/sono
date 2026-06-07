@@ -9,7 +9,6 @@ dependencies:
   flutter:
     sdk: flutter
   audioplayers: ^6.1.0
-  audio_service: ^0.18.15
   permission_handler: ^11.3.0
   provider: ^6.1.2
   google_fonts: ^6.2.1
