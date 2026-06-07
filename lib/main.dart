@@ -1,11 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:just_audio/just_audio.dart';
-import 'package:just_audio_background/just_audio_background.dart';
+import 'package:audioplayers/audioplayers.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:provider/provider.dart';
 import 'package:google_fonts/google_fonts.dart';
-import 'package:rxdart/rxdart.dart';
 import 'package:http/http.dart' as http;
 import 'package:audiotags/audiotags.dart';
 import 'dart:io';
@@ -14,23 +12,10 @@ import 'dart:convert';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
-
-  try {
-    await JustAudioBackground.init(
-      androidNotificationChannelId: 'com.skydivex.sono.channel.audio',
-      androidNotificationChannelName: 'SONO Audio',
-      androidNotificationOngoing: true,
-      androidShowNotificationBadge: true,
-    );
-  } catch (e) {
-    debugPrint('JustAudioBackground init error: $e');
-  }
-
   SystemChrome.setSystemUIOverlayStyle(const SystemUiOverlayStyle(
     statusBarColor: Colors.transparent,
     statusBarIconBrightness: Brightness.light,
   ));
-
   runApp(
     ChangeNotifierProvider(
       create: (_) => SonoProvider(),
@@ -39,21 +24,10 @@ void main() async {
   );
 }
 
-// ─── CONSTANTS ────────────────────────────────────────────────────────────────
-
 const String kAppVersion = '1.0.0';
 const String kGithubRepo = 'skydivex/sono';
 
-// ─── ENUMS ────────────────────────────────────────────────────────────────────
-
-enum SortType {
-  titleAsc,
-  titleDesc,
-  artistAsc,
-  artistDesc,
-  dateAddedAsc,
-  dateAddedDesc,
-}
+enum SortType { titleAsc, titleDesc, artistAsc, artistDesc, dateAddedAsc, dateAddedDesc }
 
 extension SortTypeLabel on SortType {
   String get label {
@@ -67,8 +41,6 @@ extension SortTypeLabel on SortType {
     }
   }
 }
-
-// ─── MODELS ───────────────────────────────────────────────────────────────────
 
 class SongModel {
   final String id;
@@ -92,17 +64,8 @@ class SongModel {
   });
 }
 
-class PositionData {
-  final Duration position;
-  final Duration bufferedPosition;
-  final Duration duration;
-  PositionData(this.position, this.bufferedPosition, this.duration);
-}
-
-// ─── PROVIDER ─────────────────────────────────────────────────────────────────
-
 class SonoProvider extends ChangeNotifier {
-  final AudioPlayer player = AudioPlayer();
+  final AudioPlayer _player = AudioPlayer();
 
   List<SongModel> allSongs = [];
   List<SongModel> filteredSongs = [];
@@ -111,32 +74,47 @@ class SonoProvider extends ChangeNotifier {
   int currentIndex = 0;
   bool isPlaying = false;
   bool shuffle = false;
-  LoopMode loopMode = LoopMode.off;
+  bool loopOne = false;
+  bool loopAll = false;
   int currentNavIndex = 0;
   String searchQuery = '';
   bool isLoading = false;
   SortType sortType = SortType.titleAsc;
+  Duration position = Duration.zero;
+  Duration duration = Duration.zero;
 
   String? latestVersion;
   String? updateUrl;
   bool hasUpdate = false;
 
   SonoProvider() {
-    _initPlayer();
-  }
-
-  void _initPlayer() {
-    player.playerStateStream.listen((state) {
-      isPlaying = state.playing;
+    _player.onPlayerStateChanged.listen((state) {
+      isPlaying = state == PlayerState.playing;
       notifyListeners();
     });
-    player.currentIndexStream.listen((index) {
-      if (index != null && queue.isNotEmpty) {
-        currentIndex = index;
-        currentSong = queue[index];
-        notifyListeners();
-      }
+    _player.onPositionChanged.listen((pos) {
+      position = pos;
+      notifyListeners();
     });
+    _player.onDurationChanged.listen((dur) {
+      duration = dur;
+      notifyListeners();
+    });
+    _player.onPlayerComplete.listen((_) {
+      _onSongComplete();
+    });
+  }
+
+  void _onSongComplete() {
+    if (loopOne) {
+      _player.seek(Duration.zero);
+      _player.resume();
+    } else if (currentIndex < queue.length - 1) {
+      next();
+    } else if (loopAll) {
+      currentIndex = 0;
+      playSong(queue[0], queue);
+    }
   }
 
   Future<void> loadSongs() async {
@@ -172,12 +150,10 @@ class SonoProvider extends ChangeNotifier {
 
     final seen = <String>{};
     final unique = songs.where((s) => seen.add(s.path)).toList();
-
     allSongs = unique;
     _applySortAndFilter();
     isLoading = false;
     notifyListeners();
-
     checkForUpdate();
   }
 
@@ -190,15 +166,12 @@ class SonoProvider extends ChangeNotifier {
           if (extensions.any((e) => lower.endsWith(e))) {
             final stat = await entity.stat();
             final name = entity.path.split('/').last;
-            final rawTitle = name.contains('.')
-                ? name.substring(0, name.lastIndexOf('.'))
-                : name;
+            final rawTitle = name.contains('.') ? name.substring(0, name.lastIndexOf('.')) : name;
 
-            // ID3 tag oku
             String title = rawTitle;
             String artist = 'Bilinmeyen Sanatçı';
             String album = '';
-            int duration = 0;
+            int dur = 0;
             Uint8List? artwork;
 
             try {
@@ -207,14 +180,12 @@ class SonoProvider extends ChangeNotifier {
                 title = (tag.title?.isNotEmpty == true) ? tag.title! : rawTitle;
                 artist = (tag.trackArtist?.isNotEmpty == true) ? tag.trackArtist! : 'Bilinmeyen Sanatçı';
                 album = tag.album ?? '';
-                duration = ((tag.duration ?? 0) * 1000).toInt();
+                dur = ((tag.duration ?? 0) * 1000).toInt();
                 if (tag.pictures.isNotEmpty) {
                   artwork = tag.pictures.first.bytes;
                 }
               }
-            } catch (e) {
-              debugPrint('Tag read error: $e');
-            }
+            } catch (_) {}
 
             songs.add(SongModel(
               id: entity.path,
@@ -222,7 +193,7 @@ class SonoProvider extends ChangeNotifier {
               artist: artist,
               album: album,
               path: entity.path,
-              duration: duration,
+              duration: dur,
               dateAdded: stat.modified,
               artwork: artwork,
             ));
@@ -242,35 +213,18 @@ class SonoProvider extends ChangeNotifier {
 
   void _applySortAndFilter() {
     List<SongModel> list = List.from(allSongs);
-
     switch (sortType) {
-      case SortType.titleAsc:
-        list.sort((a, b) => a.title.compareTo(b.title));
-        break;
-      case SortType.titleDesc:
-        list.sort((a, b) => b.title.compareTo(a.title));
-        break;
-      case SortType.artistAsc:
-        list.sort((a, b) => a.artist.compareTo(b.artist));
-        break;
-      case SortType.artistDesc:
-        list.sort((a, b) => b.artist.compareTo(a.artist));
-        break;
-      case SortType.dateAddedAsc:
-        list.sort((a, b) => a.dateAdded.compareTo(b.dateAdded));
-        break;
-      case SortType.dateAddedDesc:
-        list.sort((a, b) => b.dateAdded.compareTo(a.dateAdded));
-        break;
+      case SortType.titleAsc: list.sort((a, b) => a.title.compareTo(b.title)); break;
+      case SortType.titleDesc: list.sort((a, b) => b.title.compareTo(a.title)); break;
+      case SortType.artistAsc: list.sort((a, b) => a.artist.compareTo(b.artist)); break;
+      case SortType.artistDesc: list.sort((a, b) => b.artist.compareTo(a.artist)); break;
+      case SortType.dateAddedAsc: list.sort((a, b) => a.dateAdded.compareTo(b.dateAdded)); break;
+      case SortType.dateAddedDesc: list.sort((a, b) => b.dateAdded.compareTo(a.dateAdded)); break;
     }
-
     if (searchQuery.isNotEmpty) {
       final q = searchQuery.toLowerCase();
-      list = list.where((s) {
-        return s.title.toLowerCase().contains(q) || s.artist.toLowerCase().contains(q);
-      }).toList();
+      list = list.where((s) => s.title.toLowerCase().contains(q) || s.artist.toLowerCase().contains(q)).toList();
     }
-
     filteredSongs = list;
   }
 
@@ -285,77 +239,64 @@ class SonoProvider extends ChangeNotifier {
     currentIndex = queue.indexWhere((s) => s.id == song.id);
     if (currentIndex == -1) currentIndex = 0;
     currentSong = song;
+    position = Duration.zero;
+    duration = Duration.zero;
     notifyListeners();
 
     try {
-      // Önce sadece tıklanan şarkıyı yükle, hızlı başlasın
-      await player.setAudioSource(
-        AudioSource.uri(
-          Uri.file(song.path),
-          tag: MediaItem(
-            id: song.id,
-            title: song.title,
-            artist: song.artist,
-            album: song.album,
-            duration: Duration(milliseconds: song.duration),
-            artUri: song.artwork != null
-                ? Uri.dataFromBytes(song.artwork!, mimeType: 'image/jpeg')
-                : null,
-          ),
-        ),
-      );
-      await player.play();
-
-      // Arka planda tam playlist'i yükle
-      final playlist = ConcatenatingAudioSource(
-        children: queue.map((s) => AudioSource.uri(
-          Uri.file(s.path),
-          tag: MediaItem(
-            id: s.id,
-            title: s.title,
-            artist: s.artist,
-            album: s.album,
-            duration: Duration(milliseconds: s.duration),
-            artUri: s.artwork != null
-                ? Uri.dataFromBytes(s.artwork!, mimeType: 'image/jpeg')
-                : null,
-          ),
-        )).toList(),
-      );
-      await player.setAudioSource(playlist, initialIndex: currentIndex, initialPosition: player.position);
+      await _player.stop();
+      await _player.play(DeviceFileSource(song.path));
     } catch (e) {
-      debugPrint('playSong error: $e');
+      debugPrint('Play error: $e');
     }
-
-    notifyListeners();
   }
 
   Future<void> togglePlayPause() async {
     if (isPlaying) {
-      await player.pause();
+      await _player.pause();
     } else {
-      await player.play();
+      await _player.resume();
     }
   }
 
-  Future<void> next() async => await player.seekToNext();
-  Future<void> previous() async => await player.seekToPrevious();
+  Future<void> next() async {
+    if (queue.isEmpty) return;
+    if (shuffle) {
+      currentIndex = (currentIndex + 1 + (queue.length - 1) * (DateTime.now().millisecond % (queue.length))) % queue.length;
+    } else {
+      currentIndex = (currentIndex + 1) % queue.length;
+    }
+    await playSong(queue[currentIndex], queue);
+  }
 
-  Future<void> toggleShuffle() async {
+  Future<void> previous() async {
+    if (queue.isEmpty) return;
+    if (position.inSeconds > 3) {
+      await _player.seek(Duration.zero);
+    } else {
+      currentIndex = (currentIndex - 1 + queue.length) % queue.length;
+      await playSong(queue[currentIndex], queue);
+    }
+  }
+
+  Future<void> seek(Duration pos) async {
+    await _player.seek(pos);
+  }
+
+  void toggleShuffle() {
     shuffle = !shuffle;
-    await player.setShuffleModeEnabled(shuffle);
     notifyListeners();
   }
 
-  Future<void> toggleLoop() async {
-    if (loopMode == LoopMode.off) {
-      loopMode = LoopMode.all;
-    } else if (loopMode == LoopMode.all) {
-      loopMode = LoopMode.one;
+  void toggleLoop() {
+    if (!loopAll && !loopOne) {
+      loopAll = true;
+    } else if (loopAll) {
+      loopAll = false;
+      loopOne = true;
     } else {
-      loopMode = LoopMode.off;
+      loopOne = false;
     }
-    await player.setLoopMode(loopMode);
     notifyListeners();
   }
 
@@ -400,23 +341,12 @@ class SonoProvider extends ChangeNotifier {
     }
   }
 
-  Stream<PositionData> get positionDataStream =>
-      Rx.combineLatest3<Duration, Duration, Duration?, PositionData>(
-        player.positionStream,
-        player.bufferedPositionStream,
-        player.durationStream,
-        (position, buffered, duration) =>
-            PositionData(position, buffered, duration ?? Duration.zero),
-      );
-
   @override
   void dispose() {
-    player.dispose();
+    _player.dispose();
     super.dispose();
   }
 }
-
-// ─── APP ──────────────────────────────────────────────────────────────────────
 
 class SonoApp extends StatelessWidget {
   const SonoApp({super.key});
@@ -440,8 +370,6 @@ class SonoApp extends StatelessWidget {
     );
   }
 }
-
-// ─── HOME ─────────────────────────────────────────────────────────────────────
 
 class SonoHome extends StatefulWidget {
   const SonoHome({super.key});
@@ -467,16 +395,10 @@ class _SonoHomeState extends State<SonoHome> {
 
     if (provider.hasUpdate && !_updateShown) {
       _updateShown = true;
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        _showUpdateDialog(context, provider);
-      });
+      WidgetsBinding.instance.addPostFrameCallback((_) => _showUpdateDialog(context, provider));
     }
 
-    final pages = [
-      const LibraryPage(),
-      const SearchPage(),
-      const QueuePage(),
-    ];
+    final pages = [const LibraryPage(), const SearchPage(), const QueuePage()];
 
     return Scaffold(
       resizeToAvoidBottomInset: false,
@@ -485,12 +407,7 @@ class _SonoHomeState extends State<SonoHome> {
         children: [
           pages[provider.currentNavIndex],
           if (provider.currentSong != null)
-            Positioned(
-              left: 0,
-              right: 0,
-              bottom: 80,
-              child: const MiniPlayer(),
-            ),
+            Positioned(left: 0, right: 0, bottom: 80, child: const MiniPlayer()),
         ],
       ),
       bottomNavigationBar: const _BottomNav(),
@@ -512,10 +429,8 @@ class _SonoHomeState extends State<SonoHome> {
                 style: GoogleFonts.spaceGrotesk(color: Colors.white, fontWeight: FontWeight.w700)),
           ],
         ),
-        content: Text(
-          'SONO v${provider.latestVersion} yayınlandı.\nŞimdi güncellemek ister misin?',
-          style: TextStyle(color: Colors.white.withOpacity(0.7)),
-        ),
+        content: Text('SONO v${provider.latestVersion} yayınlandı.\nŞimdi güncellemek ister misin?',
+            style: TextStyle(color: Colors.white.withOpacity(0.7))),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context),
@@ -528,9 +443,7 @@ class _SonoHomeState extends State<SonoHome> {
             ),
             onPressed: () async {
               Navigator.pop(context);
-              if (provider.updateUrl != null) {
-                await _downloadAndInstall(context, provider.updateUrl!);
-              }
+              if (provider.updateUrl != null) await _downloadAndInstall(context, provider.updateUrl!);
             },
             child: const Text('Güncelle', style: TextStyle(color: Colors.white)),
           ),
@@ -540,40 +453,31 @@ class _SonoHomeState extends State<SonoHome> {
   }
 
   Future<void> _downloadAndInstall(BuildContext context, String url) async {
-    final scaffoldMessenger = ScaffoldMessenger.of(context);
-    scaffoldMessenger.showSnackBar(
-      const SnackBar(
-        content: Text('APK indiriliyor...'),
-        backgroundColor: Color(0xFF6C63FF),
-        duration: Duration(seconds: 60),
-      ),
-    );
-
+    final sm = ScaffoldMessenger.of(context);
+    sm.showSnackBar(const SnackBar(
+      content: Text('APK indiriliyor...'),
+      backgroundColor: Color(0xFF6C63FF),
+      duration: Duration(seconds: 60),
+    ));
     try {
       final response = await http.get(Uri.parse(url));
       final file = File('/storage/emulated/0/Download/sono-update.apk');
       await file.writeAsBytes(response.bodyBytes);
-      scaffoldMessenger.hideCurrentSnackBar();
-      scaffoldMessenger.showSnackBar(
-        SnackBar(
-          content: const Text('İndirildi! Download klasöründen yükleyin.'),
-          backgroundColor: Colors.green.shade700,
-          duration: const Duration(seconds: 5),
-        ),
-      );
+      sm.hideCurrentSnackBar();
+      sm.showSnackBar(SnackBar(
+        content: const Text('İndirildi! Download klasöründen yükleyin.'),
+        backgroundColor: Colors.green.shade700,
+        duration: const Duration(seconds: 5),
+      ));
     } catch (e) {
-      scaffoldMessenger.hideCurrentSnackBar();
-      scaffoldMessenger.showSnackBar(
-        SnackBar(
-          content: const Text('İndirme başarısız'),
-          backgroundColor: Colors.red.shade700,
-        ),
-      );
+      sm.hideCurrentSnackBar();
+      sm.showSnackBar(SnackBar(
+        content: const Text('İndirme başarısız'),
+        backgroundColor: Colors.red.shade700,
+      ));
     }
   }
 }
-
-// ─── BOTTOM NAV ───────────────────────────────────────────────────────────────
 
 class _BottomNav extends StatelessWidget {
   const _BottomNav();
@@ -613,15 +517,12 @@ class _BottomNav extends StatelessWidget {
   }
 }
 
-// ─── LIBRARY PAGE ─────────────────────────────────────────────────────────────
-
 class LibraryPage extends StatelessWidget {
   const LibraryPage({super.key});
 
   @override
   Widget build(BuildContext context) {
     final provider = context.watch<SonoProvider>();
-
     return SafeArea(
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -631,41 +532,32 @@ class LibraryPage extends StatelessWidget {
             child: Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                Text(
-                  'SONO',
-                  style: GoogleFonts.spaceGrotesk(
-                    fontSize: 32,
-                    fontWeight: FontWeight.w800,
-                    color: const Color(0xFF6C63FF),
-                    letterSpacing: 4,
-                  ),
-                ),
+                Text('SONO',
+                    style: GoogleFonts.spaceGrotesk(
+                        fontSize: 32, fontWeight: FontWeight.w800,
+                        color: const Color(0xFF6C63FF), letterSpacing: 4)),
                 _SortButton(),
               ],
             ),
           ),
           Padding(
             padding: const EdgeInsets.fromLTRB(20, 0, 20, 16),
-            child: Text(
-              '${provider.allSongs.length} şarkı • ${provider.sortType.label}',
-              style: TextStyle(color: Colors.white.withOpacity(0.4), fontSize: 13),
-            ),
+            child: Text('${provider.allSongs.length} şarkı • ${provider.sortType.label}',
+                style: TextStyle(color: Colors.white.withOpacity(0.4), fontSize: 13)),
           ),
           Expanded(
             child: provider.isLoading
                 ? const Center(child: CircularProgressIndicator(color: Color(0xFF6C63FF)))
                 : provider.filteredSongs.isEmpty
-                    ? Center(
-                        child: Column(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: [
-                            Icon(Icons.music_off_rounded, size: 64, color: Colors.white.withOpacity(0.15)),
-                            const SizedBox(height: 16),
-                            Text('Müzik bulunamadı',
-                                style: TextStyle(color: Colors.white.withOpacity(0.3), fontSize: 16)),
-                          ],
-                        ),
-                      )
+                    ? Center(child: Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Icon(Icons.music_off_rounded, size: 64, color: Colors.white.withOpacity(0.15)),
+                          const SizedBox(height: 16),
+                          Text('Müzik bulunamadı',
+                              style: TextStyle(color: Colors.white.withOpacity(0.3), fontSize: 16)),
+                        ],
+                      ))
                     : ListView.builder(
                         padding: const EdgeInsets.only(bottom: 160),
                         itemCount: provider.filteredSongs.length,
@@ -685,8 +577,6 @@ class LibraryPage extends StatelessWidget {
   }
 }
 
-// ─── SORT BUTTON ──────────────────────────────────────────────────────────────
-
 class _SortButton extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
@@ -698,8 +588,7 @@ class _SortButton extends StatelessWidget {
           context: context,
           backgroundColor: const Color(0xFF1A1A26),
           shape: const RoundedRectangleBorder(
-            borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
-          ),
+              borderRadius: BorderRadius.vertical(top: Radius.circular(24))),
           builder: (_) => Padding(
             padding: const EdgeInsets.all(20),
             child: Column(
@@ -731,8 +620,6 @@ class _SortButton extends StatelessWidget {
   }
 }
 
-// ─── SEARCH PAGE ──────────────────────────────────────────────────────────────
-
 class SearchPage extends StatefulWidget {
   const SearchPage({super.key});
 
@@ -752,7 +639,6 @@ class _SearchPageState extends State<SearchPage> {
   @override
   Widget build(BuildContext context) {
     final provider = context.watch<SonoProvider>();
-
     return SafeArea(
       child: Column(
         children: [
@@ -760,10 +646,7 @@ class _SearchPageState extends State<SearchPage> {
             padding: const EdgeInsets.fromLTRB(16, 24, 16, 16),
             child: TextField(
               controller: _controller,
-              onChanged: (val) {
-                provider.search(val);
-                setState(() {});
-              },
+              onChanged: (val) { provider.search(val); setState(() {}); },
               style: const TextStyle(color: Colors.white),
               decoration: InputDecoration(
                 hintText: 'Şarkı veya sanatçı ara...',
@@ -772,23 +655,14 @@ class _SearchPageState extends State<SearchPage> {
                 suffixIcon: _controller.text.isNotEmpty
                     ? IconButton(
                         icon: const Icon(Icons.clear, color: Colors.white54),
-                        onPressed: () {
-                          _controller.clear();
-                          provider.search('');
-                          setState(() {});
-                        },
-                      )
+                        onPressed: () { _controller.clear(); provider.search(''); setState(() {}); })
                     : null,
                 filled: true,
                 fillColor: const Color(0xFF1A1A26),
-                border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(16),
-                  borderSide: BorderSide.none,
-                ),
+                border: OutlineInputBorder(borderRadius: BorderRadius.circular(16), borderSide: BorderSide.none),
                 focusedBorder: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(16),
-                  borderSide: const BorderSide(color: Color(0xFF6C63FF)),
-                ),
+                    borderRadius: BorderRadius.circular(16),
+                    borderSide: const BorderSide(color: Color(0xFF6C63FF))),
               ),
             ),
           ),
@@ -803,9 +677,8 @@ class _SearchPageState extends State<SearchPage> {
             ),
           Expanded(
             child: provider.filteredSongs.isEmpty && provider.searchQuery.isNotEmpty
-                ? Center(
-                    child: Text('Sonuç bulunamadı',
-                        style: TextStyle(color: Colors.white.withOpacity(0.3))))
+                ? Center(child: Text('Sonuç bulunamadı',
+                    style: TextStyle(color: Colors.white.withOpacity(0.3))))
                 : ListView.builder(
                     padding: const EdgeInsets.only(bottom: 160),
                     itemCount: provider.filteredSongs.length,
@@ -826,15 +699,12 @@ class _SearchPageState extends State<SearchPage> {
   }
 }
 
-// ─── QUEUE PAGE ───────────────────────────────────────────────────────────────
-
 class QueuePage extends StatelessWidget {
   const QueuePage({super.key});
 
   @override
   Widget build(BuildContext context) {
     final provider = context.watch<SonoProvider>();
-
     return SafeArea(
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -846,17 +716,14 @@ class QueuePage extends StatelessWidget {
           ),
           Expanded(
             child: provider.queue.isEmpty
-                ? Center(
-                    child: Column(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        Icon(Icons.queue_music_rounded, size: 64, color: Colors.white.withOpacity(0.15)),
-                        const SizedBox(height: 16),
-                        Text('Kuyruk boş',
-                            style: TextStyle(color: Colors.white.withOpacity(0.3), fontSize: 16)),
-                      ],
-                    ),
-                  )
+                ? Center(child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Icon(Icons.queue_music_rounded, size: 64, color: Colors.white.withOpacity(0.15)),
+                      const SizedBox(height: 16),
+                      Text('Kuyruk boş', style: TextStyle(color: Colors.white.withOpacity(0.3), fontSize: 16)),
+                    ],
+                  ))
                 : ListView.builder(
                     padding: const EdgeInsets.only(bottom: 160),
                     itemCount: provider.queue.length,
@@ -877,8 +744,6 @@ class QueuePage extends StatelessWidget {
     );
   }
 }
-
-// ─── SONG TILE ────────────────────────────────────────────────────────────────
 
 class SongTile extends StatelessWidget {
   final SongModel song;
@@ -905,33 +770,19 @@ class SongTile extends StatelessWidget {
         child: song.artwork != null
             ? Image.memory(song.artwork!, width: 52, height: 52, fit: BoxFit.cover)
             : Container(
-                width: 52,
-                height: 52,
-                decoration: BoxDecoration(
-                  color: const Color(0xFF1A1A26),
-                  borderRadius: BorderRadius.circular(10),
-                ),
+                width: 52, height: 52,
+                decoration: BoxDecoration(color: const Color(0xFF1A1A26), borderRadius: BorderRadius.circular(10)),
                 child: Icon(Icons.music_note, color: const Color(0xFF6C63FF).withOpacity(0.6), size: 24),
               ),
       ),
-      title: _buildHighlightedText(
-        song.title,
-        highlightQuery,
-        const TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.w600),
-        isCurrent
-            ? const TextStyle(color: Color(0xFF6C63FF), fontSize: 14, fontWeight: FontWeight.w700)
-            : null,
-      ),
-      subtitle: _buildHighlightedText(
-        song.artist,
-        highlightQuery,
-        TextStyle(color: Colors.white.withOpacity(0.45), fontSize: 12),
-        null,
-      ),
+      title: _buildText(song.title, highlightQuery,
+          const TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.w600),
+          isCurrent ? const TextStyle(color: Color(0xFF6C63FF), fontSize: 14, fontWeight: FontWeight.w700) : null),
+      subtitle: _buildText(song.artist, highlightQuery,
+          TextStyle(color: Colors.white.withOpacity(0.45), fontSize: 12), null),
       trailing: isPlaying
           ? const _PlayingIndicator()
-          : Text(_formatDuration(song.duration),
-              style: TextStyle(color: Colors.white.withOpacity(0.3), fontSize: 12)),
+          : Text(_fmt(song.duration), style: TextStyle(color: Colors.white.withOpacity(0.3), fontSize: 12)),
       onTap: () {
         context.read<SonoProvider>().playSong(song, songList);
         Navigator.push(context, MaterialPageRoute(builder: (_) => const NowPlayingPage()));
@@ -939,42 +790,33 @@ class SongTile extends StatelessWidget {
     );
   }
 
-  Widget _buildHighlightedText(String text, String query, TextStyle baseStyle, TextStyle? overrideStyle) {
-    if (query.isEmpty || overrideStyle != null) {
-      return Text(text, style: overrideStyle ?? baseStyle, maxLines: 1, overflow: TextOverflow.ellipsis);
+  Widget _buildText(String text, String query, TextStyle base, TextStyle? override) {
+    if (query.isEmpty || override != null) {
+      return Text(text, style: override ?? base, maxLines: 1, overflow: TextOverflow.ellipsis);
     }
-
-    final lowerText = text.toLowerCase();
-    final lowerQuery = query.toLowerCase();
-    final index = lowerText.indexOf(lowerQuery);
-
-    if (index == -1) {
-      return Text(text, style: baseStyle, maxLines: 1, overflow: TextOverflow.ellipsis);
-    }
-
+    final lo = text.toLowerCase();
+    final lq = query.toLowerCase();
+    final i = lo.indexOf(lq);
+    if (i == -1) return Text(text, style: base, maxLines: 1, overflow: TextOverflow.ellipsis);
     return RichText(
       maxLines: 1,
       overflow: TextOverflow.ellipsis,
       text: TextSpan(children: [
-        TextSpan(text: text.substring(0, index), style: baseStyle),
-        TextSpan(
-          text: text.substring(index, index + query.length),
-          style: baseStyle.copyWith(color: const Color(0xFF6C63FF), fontWeight: FontWeight.w800),
-        ),
-        TextSpan(text: text.substring(index + query.length), style: baseStyle),
+        TextSpan(text: text.substring(0, i), style: base),
+        TextSpan(text: text.substring(i, i + query.length),
+            style: base.copyWith(color: const Color(0xFF6C63FF), fontWeight: FontWeight.w800)),
+        TextSpan(text: text.substring(i + query.length), style: base),
       ]),
     );
   }
 
-  String _formatDuration(int ms) {
+  String _fmt(int ms) {
     final d = Duration(milliseconds: ms);
     final m = d.inMinutes.remainder(60).toString().padLeft(2, '0');
     final s = d.inSeconds.remainder(60).toString().padLeft(2, '0');
     return '$m:$s';
   }
 }
-
-// ─── PLAYING INDICATOR ────────────────────────────────────────────────────────
 
 class _PlayingIndicator extends StatefulWidget {
   const _PlayingIndicator();
@@ -989,12 +831,8 @@ class _PlayingIndicatorState extends State<_PlayingIndicator> with TickerProvide
   @override
   void initState() {
     super.initState();
-    _controllers = List.generate(3, (i) {
-      return AnimationController(
-        vsync: this,
-        duration: Duration(milliseconds: 400 + i * 100),
-      )..repeat(reverse: true);
-    });
+    _controllers = List.generate(3, (i) =>
+        AnimationController(vsync: this, duration: Duration(milliseconds: 400 + i * 100))..repeat(reverse: true));
   }
 
   @override
@@ -1006,30 +844,22 @@ class _PlayingIndicatorState extends State<_PlayingIndicator> with TickerProvide
   @override
   Widget build(BuildContext context) {
     return SizedBox(
-      width: 20,
-      height: 20,
+      width: 20, height: 20,
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
         crossAxisAlignment: CrossAxisAlignment.end,
-        children: List.generate(3, (i) {
-          return AnimatedBuilder(
-            animation: _controllers[i],
-            builder: (_, __) => Container(
-              width: 4,
-              height: 6 + _controllers[i].value * 14,
-              decoration: BoxDecoration(
-                color: const Color(0xFF6C63FF),
-                borderRadius: BorderRadius.circular(2),
-              ),
-            ),
-          );
-        }),
+        children: List.generate(3, (i) => AnimatedBuilder(
+          animation: _controllers[i],
+          builder: (_, __) => Container(
+            width: 4,
+            height: 6 + _controllers[i].value * 14,
+            decoration: BoxDecoration(color: const Color(0xFF6C63FF), borderRadius: BorderRadius.circular(2)),
+          ),
+        )),
       ),
     );
   }
 }
-
-// ─── MINI PLAYER ─────────────────────────────────────────────────────────────
 
 class MiniPlayer extends StatelessWidget {
   const MiniPlayer({super.key});
@@ -1049,13 +879,7 @@ class MiniPlayer extends StatelessWidget {
           color: const Color(0xFF1A1A2E),
           borderRadius: BorderRadius.circular(20),
           border: Border.all(color: Colors.white.withOpacity(0.08)),
-          boxShadow: [
-            BoxShadow(
-              color: const Color(0xFF6C63FF).withOpacity(0.15),
-              blurRadius: 20,
-              offset: const Offset(0, 4),
-            ),
-          ],
+          boxShadow: [BoxShadow(color: const Color(0xFF6C63FF).withOpacity(0.15), blurRadius: 20, offset: const Offset(0, 4))],
         ),
         child: Row(
           children: [
@@ -1063,12 +887,8 @@ class MiniPlayer extends StatelessWidget {
               borderRadius: BorderRadius.circular(10),
               child: song.artwork != null
                   ? Image.memory(song.artwork!, width: 44, height: 44, fit: BoxFit.cover)
-                  : Container(
-                      width: 44,
-                      height: 44,
-                      color: const Color(0xFF12121A),
-                      child: const Icon(Icons.music_note, color: Color(0xFF6C63FF), size: 20),
-                    ),
+                  : Container(width: 44, height: 44, color: const Color(0xFF12121A),
+                      child: const Icon(Icons.music_note, color: Color(0xFF6C63FF), size: 20)),
             ),
             const SizedBox(width: 12),
             Expanded(
@@ -1078,21 +898,16 @@ class MiniPlayer extends StatelessWidget {
                 children: [
                   Text(song.title,
                       style: const TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.w600),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis),
+                      maxLines: 1, overflow: TextOverflow.ellipsis),
                   Text(song.artist,
                       style: TextStyle(color: Colors.white.withOpacity(0.4), fontSize: 11),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis),
+                      maxLines: 1, overflow: TextOverflow.ellipsis),
                 ],
               ),
             ),
             IconButton(
-              icon: Icon(
-                provider.isPlaying ? Icons.pause_rounded : Icons.play_arrow_rounded,
-                color: Colors.white,
-                size: 28,
-              ),
+              icon: Icon(provider.isPlaying ? Icons.pause_rounded : Icons.play_arrow_rounded,
+                  color: Colors.white, size: 28),
               onPressed: provider.togglePlayPause,
             ),
             IconButton(
@@ -1106,16 +921,23 @@ class MiniPlayer extends StatelessWidget {
   }
 }
 
-// ─── NOW PLAYING PAGE ─────────────────────────────────────────────────────────
-
 class NowPlayingPage extends StatelessWidget {
   const NowPlayingPage({super.key});
+
+  String _fmt(Duration d) {
+    final m = d.inMinutes.remainder(60).toString().padLeft(2, '0');
+    final s = d.inSeconds.remainder(60).toString().padLeft(2, '0');
+    return '$m:$s';
+  }
 
   @override
   Widget build(BuildContext context) {
     final provider = context.watch<SonoProvider>();
     final song = provider.currentSong;
     if (song == null) return const SizedBox();
+
+    final maxDur = provider.duration.inMilliseconds.toDouble();
+    final curPos = provider.position.inMilliseconds.clamp(0, maxDur > 0 ? maxDur.toInt() : 1).toDouble();
 
     return Scaffold(
       resizeToAvoidBottomInset: false,
@@ -1127,15 +949,10 @@ class NowPlayingPage extends StatelessWidget {
           icon: const Icon(Icons.keyboard_arrow_down_rounded, size: 32, color: Colors.white),
           onPressed: () => Navigator.pop(context),
         ),
-        title: Text(
-          'ŞİMDİ ÇALIYOR',
-          style: GoogleFonts.spaceGrotesk(
-            fontSize: 12,
-            fontWeight: FontWeight.w700,
-            letterSpacing: 3,
-            color: Colors.white.withOpacity(0.4),
-          ),
-        ),
+        title: Text('ŞİMDİ ÇALIYOR',
+            style: GoogleFonts.spaceGrotesk(
+                fontSize: 12, fontWeight: FontWeight.w700,
+                letterSpacing: 3, color: Colors.white.withOpacity(0.4))),
         centerTitle: true,
       ),
       body: Padding(
@@ -1144,29 +961,18 @@ class NowPlayingPage extends StatelessWidget {
           children: [
             const SizedBox(height: 24),
             Container(
-              width: double.infinity,
-              height: 300,
+              width: double.infinity, height: 300,
               decoration: BoxDecoration(
                 borderRadius: BorderRadius.circular(24),
-                boxShadow: [
-                  BoxShadow(
-                    color: const Color(0xFF6C63FF).withOpacity(0.3),
-                    blurRadius: 40,
-                    offset: const Offset(0, 16),
-                  ),
-                ],
+                boxShadow: [BoxShadow(color: const Color(0xFF6C63FF).withOpacity(0.3), blurRadius: 40, offset: const Offset(0, 16))],
               ),
               child: ClipRRect(
                 borderRadius: BorderRadius.circular(24),
                 child: song.artwork != null
                     ? Image.memory(song.artwork!, fit: BoxFit.cover)
                     : Container(
-                        decoration: BoxDecoration(
-                          color: const Color(0xFF1A1A26),
-                          borderRadius: BorderRadius.circular(24),
-                        ),
-                        child: Icon(Icons.music_note_rounded, size: 80,
-                            color: const Color(0xFF6C63FF).withOpacity(0.4)),
+                        decoration: BoxDecoration(color: const Color(0xFF1A1A26), borderRadius: BorderRadius.circular(24)),
+                        child: Icon(Icons.music_note_rounded, size: 80, color: const Color(0xFF6C63FF).withOpacity(0.4)),
                       ),
               ),
             ),
@@ -1176,61 +982,40 @@ class NowPlayingPage extends StatelessWidget {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text(
-                    song.title,
-                    style: GoogleFonts.spaceGrotesk(
-                        fontSize: 22, fontWeight: FontWeight.w800, color: Colors.white),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
+                  Text(song.title,
+                      style: GoogleFonts.spaceGrotesk(fontSize: 22, fontWeight: FontWeight.w800, color: Colors.white),
+                      maxLines: 1, overflow: TextOverflow.ellipsis),
                   const SizedBox(height: 4),
                   Text(song.artist,
                       style: TextStyle(color: Colors.white.withOpacity(0.5), fontSize: 15),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis),
+                      maxLines: 1, overflow: TextOverflow.ellipsis),
                 ],
               ),
             ),
             const SizedBox(height: 28),
-            StreamBuilder<PositionData>(
-              stream: provider.positionDataStream,
-              builder: (context, snapshot) {
-                final data = snapshot.data ??
-                    PositionData(Duration.zero, Duration.zero, Duration.zero);
-                final position = data.position;
-                final duration = data.duration;
-
-                return Column(
-                  children: [
-                    SliderTheme(
-                      data: SliderTheme.of(context).copyWith(
-                        activeTrackColor: const Color(0xFF6C63FF),
-                        inactiveTrackColor: Colors.white.withOpacity(0.1),
-                        thumbColor: Colors.white,
-                        thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 6),
-                        overlayShape: SliderComponentShape.noOverlay,
-                        trackHeight: 3,
-                      ),
-                      child: Slider(
-                        value: position.inMilliseconds.clamp(0, duration.inMilliseconds).toDouble(),
-                        max: duration.inMilliseconds.toDouble(),
-                        onChanged: (value) {
-                          provider.player.seek(Duration(milliseconds: value.toInt()));
-                        },
-                      ),
-                    ),
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        Text(_fmt(position),
-                            style: TextStyle(color: Colors.white.withOpacity(0.4), fontSize: 12)),
-                        Text(_fmt(duration),
-                            style: TextStyle(color: Colors.white.withOpacity(0.4), fontSize: 12)),
-                      ],
-                    ),
-                  ],
-                );
-              },
+            SliderTheme(
+              data: SliderTheme.of(context).copyWith(
+                activeTrackColor: const Color(0xFF6C63FF),
+                inactiveTrackColor: Colors.white.withOpacity(0.1),
+                thumbColor: Colors.white,
+                thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 6),
+                overlayShape: SliderComponentShape.noOverlay,
+                trackHeight: 3,
+              ),
+              child: Slider(
+                value: curPos,
+                max: maxDur > 0 ? maxDur : 1,
+                onChanged: (value) => provider.seek(Duration(milliseconds: value.toInt())),
+              ),
+            ),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Text(_fmt(provider.position),
+                    style: TextStyle(color: Colors.white.withOpacity(0.4), fontSize: 12)),
+                Text(_fmt(provider.duration),
+                    style: TextStyle(color: Colors.white.withOpacity(0.4), fontSize: 12)),
+              ],
             ),
             const SizedBox(height: 16),
             Row(
@@ -1238,8 +1023,7 @@ class NowPlayingPage extends StatelessWidget {
               children: [
                 IconButton(
                   icon: Icon(Icons.shuffle_rounded,
-                      color: provider.shuffle ? const Color(0xFF6C63FF) : Colors.white.withOpacity(0.4),
-                      size: 24),
+                      color: provider.shuffle ? const Color(0xFF6C63FF) : Colors.white.withOpacity(0.4), size: 24),
                   onPressed: provider.toggleShuffle,
                 ),
                 IconButton(
@@ -1249,24 +1033,14 @@ class NowPlayingPage extends StatelessWidget {
                 GestureDetector(
                   onTap: provider.togglePlayPause,
                   child: Container(
-                    width: 68,
-                    height: 68,
+                    width: 68, height: 68,
                     decoration: BoxDecoration(
                       color: const Color(0xFF6C63FF),
                       shape: BoxShape.circle,
-                      boxShadow: [
-                        BoxShadow(
-                          color: const Color(0xFF6C63FF).withOpacity(0.4),
-                          blurRadius: 20,
-                          offset: const Offset(0, 6),
-                        ),
-                      ],
+                      boxShadow: [BoxShadow(color: const Color(0xFF6C63FF).withOpacity(0.4), blurRadius: 20, offset: const Offset(0, 6))],
                     ),
-                    child: Icon(
-                      provider.isPlaying ? Icons.pause_rounded : Icons.play_arrow_rounded,
-                      color: Colors.white,
-                      size: 36,
-                    ),
+                    child: Icon(provider.isPlaying ? Icons.pause_rounded : Icons.play_arrow_rounded,
+                        color: Colors.white, size: 36),
                   ),
                 ),
                 IconButton(
@@ -1275,10 +1049,8 @@ class NowPlayingPage extends StatelessWidget {
                 ),
                 IconButton(
                   icon: Icon(
-                    provider.loopMode == LoopMode.one ? Icons.repeat_one_rounded : Icons.repeat_rounded,
-                    color: provider.loopMode != LoopMode.off
-                        ? const Color(0xFF6C63FF)
-                        : Colors.white.withOpacity(0.4),
+                    provider.loopOne ? Icons.repeat_one_rounded : Icons.repeat_rounded,
+                    color: (provider.loopOne || provider.loopAll) ? const Color(0xFF6C63FF) : Colors.white.withOpacity(0.4),
                     size: 24,
                   ),
                   onPressed: provider.toggleLoop,
@@ -1289,11 +1061,5 @@ class NowPlayingPage extends StatelessWidget {
         ),
       ),
     );
-  }
-
-  String _fmt(Duration d) {
-    final m = d.inMinutes.remainder(60).toString().padLeft(2, '0');
-    final s = d.inSeconds.remainder(60).toString().padLeft(2, '0');
-    return '$m:$s';
   }
 }
