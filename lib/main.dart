@@ -285,10 +285,30 @@ class SonoProvider extends ChangeNotifier {
     currentIndex = queue.indexWhere((s) => s.id == song.id);
     if (currentIndex == -1) currentIndex = 0;
     currentSong = song;
+    notifyListeners();
 
-    final playlist = ConcatenatingAudioSource(
-      children: queue.map((s) {
-        return AudioSource.uri(
+    try {
+      // Önce sadece tıklanan şarkıyı yükle, hızlı başlasın
+      await player.setAudioSource(
+        AudioSource.uri(
+          Uri.file(song.path),
+          tag: MediaItem(
+            id: song.id,
+            title: song.title,
+            artist: song.artist,
+            album: song.album,
+            duration: Duration(milliseconds: song.duration),
+            artUri: song.artwork != null
+                ? Uri.dataFromBytes(song.artwork!, mimeType: 'image/jpeg')
+                : null,
+          ),
+        ),
+      );
+      await player.play();
+
+      // Arka planda tam playlist'i yükle
+      final playlist = ConcatenatingAudioSource(
+        children: queue.map((s) => AudioSource.uri(
           Uri.file(s.path),
           tag: MediaItem(
             id: s.id,
@@ -296,14 +316,17 @@ class SonoProvider extends ChangeNotifier {
             artist: s.artist,
             album: s.album,
             duration: Duration(milliseconds: s.duration),
-            artUri: s.artwork != null ? Uri.dataFromBytes(s.artwork!, mimeType: 'image/jpeg') : null,
+            artUri: s.artwork != null
+                ? Uri.dataFromBytes(s.artwork!, mimeType: 'image/jpeg')
+                : null,
           ),
-        );
-      }).toList(),
-    );
+        )).toList(),
+      );
+      await player.setAudioSource(playlist, initialIndex: currentIndex, initialPosition: player.position);
+    } catch (e) {
+      debugPrint('playSong error: $e');
+    }
 
-    await player.setAudioSource(playlist, initialIndex: currentIndex);
-    await player.play();
     notifyListeners();
   }
 
